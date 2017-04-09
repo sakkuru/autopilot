@@ -1,56 +1,84 @@
-# autopilot
+# Blue Green Push / Rollback
 
-*cf plugin for hands-off, zero downtime application deploys*
+This is a Cloud Foundry CLI plugin. I learn/forked code from the great plugin, [autopilot](https://github.com/contraband/autopilot). This feature enable you to zero-downtime-deploy with versioning and Rollback feature. 
 
-![Autopilot](http://i.imgur.com/xj2vbwk.jpg)
-
-## installation
-
-Download the latest version from the [releases][releases] page and make it executable.
+# install 
 
 ```
-$ cf install-plugin path/to/downloaded/binary
+cf insall-plugin PATH_TO_BLUE_GREEN_BINARY
+``` 
+
+# 1. deployment
+
+`blue-green-push` command enable you to deploy with versioning.
+
+## 1.1. usage
+
+```
+cf blue-green-push application-name -f manifest.yml
 ```
 
-[releases]: https://github.com/contraband/autopilot/releases
+## 1.2. behavior
 
-## usage
+The command push your application. If the application has old version,
+the command rename the current version to `applicationName-g1` and unmap
+gracefully and stop it. This command save two versions.
+
+The command behaves like this.
 
 ```
-$ cf zero-downtime-push application-to-replace \
-    -f path/to/new_manifest.yml \
-    -p path/to/new/path
+cf rename application-to-replace application-to-replace-g1
+cf push -f path/to/new_manifest.yml -n application-to-replace-staging
+cf map-route application-to-replace-staging xxxx.io (domain name) -n application-to-replace
+cf unmap-route application-to-replace-g1 xxxx.io (domain name) -n application-to-replace
+cf stop application-to-replace-g1
 ```
 
-## warning
+# 2. Rollback
 
-Your application manifest **must** be up to date or the new application that
-is created will not resemble the application that it is replacing.
+`blue-green-rollback` command rollback to suitable version.
 
-You can check your application doesn't have unexpected environment variables or
-services which are missing from the application manifest with
-[Antifreeze][antifreeze].
+## 2.1. usage
 
-[antifreeze]: https://github.com/odlp/antifreeze
+```
+cf blue-green-rollback application-name version (e.g. g1 or g2)
+```
 
-## method
+## 2.2. behavior
 
-*Autopilot* takes a different approach to other zero-downtime plugins. It
-doesn't perform any [complex route re-mappings][indiana-jones] instead it leans
-on the manifest feature of the Cloud Foundry CLI. The method also has the
-advantage of treating a manifest as the source of truth and will converge the
-state of the system towards that. This makes the plugin ideal for continuous
-delivery environments.
+The command rollback your application. Start the old version and map route
+the host which is current url. Then unmap the current version. After that,
+it swap the application name. 
 
-1. The old application is renamed to `<APP-NAME>-venerable`. It keeps its old route
-   mappings and this change is invisible to users.
+This is the similar behavior of this rollback feature.
 
-2. The new application is pushed to `<APP-NAME>` (assuming that the name has
-   not been changed in the manifest). It binds to the same routes as the old
-   application (due to them being defined in the manifest) and traffic begins to
-   be load-balanced between the two applications.
+```
+cf start application-name-g1
+cf map-route application-name-g1 xxxx.io (domain name) -n application-name
+cf unmap-route application-name xxxx.io (domain name) -n application-name
+cf rename application-name application-name-now-on-swapping
+cf rename application-name-g1 application-name
+cf rename application-name-now-on-swapping application-name-g1
+```
 
-3. The old application is deleted along with its route mappings. All traffic
-   now goes to the new application.
+# 3. Versioning
 
-[indiana-jones]: https://www.youtube.com/watch?v=0gU35Tgtlmg
+This tool leave maximum three versions for rollback.
+
+```
+application-to-replace (current)
+application-to-replace-g1
+application-to-replace-g2
+```
+
+If you deploy the new version, g2 will be removed. then current -> g1 and g1 -> g2.
+
+# 4. Pland feature
+
+Now we support push/rollback feature. We will develop rolling update feature and
+specify the route feature if the app have mutiple domain.  
+
+Enjoy coding!
+
+
+
