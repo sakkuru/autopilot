@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"code.cloudfoundry.org/cli/plugin"
-	"github.com/contraband/autopilot/rewind"
+	"github.com/sakkuru/rollback-push/rewind"
 )
 
 func fatalIf(err error) {
@@ -27,27 +27,44 @@ func main() {
 type RollbackPlugin struct{}
 
 func g1AppName(appName string) string {
-	return fmt.Sprintf("%s-g1", appName)
+	return versionedAppName(appName, "g1")
 }
 func g2AppName(appName string) string {
-	return fmt.Sprintf("%s-g2", appName)
+	return versionedAppName(appName, "g2")
+}
+func versionedAppName(appName string, version string) string {
+	return fmt.Sprintf("%s-%s", appName, version)
+}
+func getActionsForRollback(appRepo *ApplicationRepo, appName string, version string) []rewind.Action {
+	return []rewind.Action{
+		{
+			// start an old app
+			Forward: func() error {
+				return appRepo.StartApplication(versionedAppName(appName, version))
+			},
+		},
+		{
+			Forward: func() error {
+				// Map-route it. then unmap the current app
+				hostName, err := appRepo.GetHostName(appName)
+				if err != nil {
+					return fmt.Errorf("Can not get hostname of the %s", appName)
+				}
+				appRepo.MapRouteApplication(versionedAppName(appName, version), hostName)
+				return appRepo.UnMapRouteApplication(appName, hostName)
+			},
+		},
+		{
+			Forward: func() error {
+				// swap the name between the current app and the old app
+				return appRepo.SwapApplication(appName, versionedAppName(appName, version))
+			},
+		},
+	}
 }
 
 func getActionsForExistingApp(appRepo *ApplicationRepo, appName, manifestPath, appPath string, g1Exists bool, g2Exists bool) []rewind.Action {
 	return []rewind.Action{
-		// // versioning
-		// {
-		// 	Forward: func() error {
-		// 		if g2Exists {
-		// 			appRepo.DeleteApplication(g2AppName(appName))
-		// 		}
-		// 		if g1Exists {
-		// 			appRepo.RenameApplication(g1AppName(appName), g2AppName(appName))
-		// 		}
-		// 		return
-		// 	},
-		// },
-		// rename
 		{
 			Forward: func() error {
 				// versioning
@@ -96,38 +113,70 @@ func getActionsForNewApp(appRepo *ApplicationRepo, appName, manifestPath, appPat
 
 func (plugin RollbackPlugin) Run(cliConnection plugin.CliConnection, args []string) {
 	appRepo := NewApplicationRepo(cliConnection)
-	appName, manifestPath, appPath, err := ParseArgs(args)
-	fatalIf(err)
+	if args[0] == "blue-green-push" {
 
-	appExists, err := appRepo.DoesAppExist(appName)
-	fatalIf(err)
+		appName, manifestPath, appPath, err := ParseArgs(args)
+		fatalIf(err)
 
-	g1Exists, err := appRepo.DoesAppExist(appName + "-g1")
-	fatalIf(err)
+		appExists, err := appRepo.DoesAppExist(appName)
+		fatalIf(err)
 
-	g2Exists, err := appRepo.DoesAppExist(appName + "-g2")
+		g1Exists, err := appRepo.DoesAppExist(appName + "-g1")
+		fatalIf(err)
 
-	var actionList []rewind.Action
+		g2Exists, err := appRepo.DoesAppExist(appName + "-g2")
 
-	if appExists {
-		actionList = getActionsForExistingApp(appRepo, appName, manifestPath, appPath, g1Exists, g2Exists)
-	} else {
-		actionList = getActionsForNewApp(appRepo, appName, manifestPath, appPath)
+		var actionList []rewind.Action
+
+		if appExists {
+			actionList = getActionsForExistingApp(appRepo, appName, manifestPath, appPath, g1Exists, g2Exists)
+		} else {
+			actionList = getActionsForNewApp(appRepo, appName, manifestPath, appPath)
+		}
+
+		actions := rewind.Actions{
+			Actions:              actionList,
+			RewindFailureMessage: "Oh no. Something's gone wrong. I've tried to roll back but you should check to see if everything is OK.",
+		}
+
+		err = actions.Execute()
+		fatalIf(err)
+
+		fmt.Println()
+		fmt.Println("A new version of your application has successfully been pushed!")
+		fmt.Println()
+
+		_ = appRepo.ListApplications()
 	}
 
-	actions := rewind.Actions{
-		Actions:              actionList,
-		RewindFailureMessage: "Oh no. Something's gone wrong. I've tried to roll back but you should check to see if everything is OK.",
+	if args[0] == "blue-green-rollback" {
+		appName, version, err := ParseRollbackArgs(args)
+		fatalIf(err)
+		var actionList []rewind.Action
+
+		appExists, err := appRepo.DoesAppExist(appName)
+		fatalIf(err)
+
+		if appExists {
+			actionList = getActionsForRollback(appRepo, appName, version)
+
+		} else {
+			err := fmt.Errorf("Application: %s not found", appName)
+			fatalIf(err)
+		}
+		actions := rewind.Actions{
+			Actions:              actionList,
+			RewindFailureMessage: "Oh no. Something's gone wrong. I've tried to roll back but you should check to see if everything is OK.",
+		}
+
+		err = actions.Execute()
+		fatalIf(err)
+
+		fmt.Println()
+		fmt.Println(appName + " is swapped with " + versionedAppName(appName, version))
+		fmt.Println()
 	}
 
-	err = actions.Execute()
-	fatalIf(err)
-
-	fmt.Println()
-	fmt.Println("A new version of your application has successfully been pushed!")
-	fmt.Println()
-
-	_ = appRepo.ListApplications()
 }
 
 func (RollbackPlugin) GetMetadata() plugin.PluginMetadata {
@@ -146,8 +195,26 @@ func (RollbackPlugin) GetMetadata() plugin.PluginMetadata {
 					Usage: "$ cf blue-green-push application-to-replace \\ \n \t-f path/to/new_manifest.yml \\ \n \t-p path/to/new/path",
 				},
 			},
+			{
+				Name:     "blue-green-rollback",
+				HelpText: "Perform a rollback from old version",
+				UsageDetails: plugin.Usage{
+					Usage: "$ cf blue-green-rollback application-name version (e.g. g1 or g2)",
+				},
+			},
 		},
 	}
+}
+
+func ParseRollbackArgs(args []string) (string, string, error) {
+	flags := flag.NewFlagSet("blue-green-rollback", flag.ContinueOnError)
+	err := flags.Parse(args[2:])
+	if err != nil {
+		return "", "", err
+	}
+	appName := args[1]
+	version := args[2]
+	return appName, version, nil
 }
 
 func ParseArgs(args []string) (string, string, string, error) {
@@ -180,14 +247,43 @@ func NewApplicationRepo(conn plugin.CliConnection) *ApplicationRepo {
 		conn: conn,
 	}
 }
+func (repo *ApplicationRepo) GetHostName(appName string) (string, error) {
+	result, err := repo.conn.GetApp(appName)
+	if err != nil {
+		return "", err
+	}
+	return result.Routes[0].Host, err
+}
+
+func (repo *ApplicationRepo) GetDomainName(appName string) (string, error) {
+	result, err := repo.conn.GetApp(appName)
+	if err != nil {
+		return "", err
+	}
+	return result.Routes[0].Domain.Name, err
+}
+
+func (repo *ApplicationRepo) MapRouteApplication(appName string, hostName string) error {
+	domainName, err := repo.GetDomainName(appName)
+	if err != nil {
+		return err
+	}
+	_, err = repo.conn.CliCommand("map-route", appName, domainName, "-n", hostName)
+	return err
+}
 
 func (repo *ApplicationRepo) UnMapRouteApplication(appName string, hostName string) error {
-	result, err := repo.conn.GetApp(appName)
+	domainName, err := repo.GetDomainName(appName)
 	// fmt.Println(result)
 	if err != nil {
 		return err
 	}
-	_, err = repo.conn.CliCommand("unmap-route", appName, result.Routes[0].Domain.Name, "-n", hostName)
+	_, err = repo.conn.CliCommand("unmap-route", appName, domainName, "-n", hostName)
+	return err
+}
+
+func (repo *ApplicationRepo) StartApplication(appName string) error {
+	_, err := repo.conn.CliCommand("start", appName)
 	return err
 }
 
@@ -198,6 +294,19 @@ func (repo *ApplicationRepo) StopApplication(appName string) error {
 
 func (repo *ApplicationRepo) RenameApplication(oldName, newName string) error {
 	_, err := repo.conn.CliCommand("rename", oldName, newName)
+	return err
+}
+func (repo *ApplicationRepo) SwapApplication(appNameA string, appNameB string) error {
+	tempAppName := appNameA + "-now-on-swapping"
+	err := repo.RenameApplication(appNameA, tempAppName)
+	if err != nil {
+		return err
+	}
+	err = repo.RenameApplication(appNameB, appNameA)
+	if err != nil {
+		return err
+	}
+	err = repo.RenameApplication(tempAppName, appNameB)
 	return err
 }
 
