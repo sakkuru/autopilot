@@ -9,21 +9,20 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
-	. "github.com/contraband/autopilot"
-
 	plugin_models "code.cloudfoundry.org/cli/plugin/models"
+	rollback "github.com/sakkuru/rollback-push"
 )
 
 func TestAutopilot(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Autopilot Suite")
+	RunSpecs(t, "Blue Green Push/Rollback plugin")
 }
 
 var _ = Describe("Flag Parsing", func() {
 	It("parses a complete set of args", func() {
-		appName, manifestPath, appPath, err := ParseArgs(
+		appName, manifestPath, appPath, err := rollback.ParseArgs(
 			[]string{
-				"zero-downtime-push",
+				"blue-green-push",
 				"appname",
 				"-f", "manifest-path",
 				"-p", "app-path",
@@ -37,26 +36,41 @@ var _ = Describe("Flag Parsing", func() {
 	})
 
 	It("requires a manifest", func() {
-		_, _, _, err := ParseArgs(
+		_, _, _, err := rollback.ParseArgs(
 			[]string{
-				"zero-downtime-push",
+				"blue-green-push",
 				"appname",
 				"-p", "app-path",
 			},
 		)
-		Expect(err).To(MatchError(ErrNoManifest))
+		Expect(err).To(MatchError(rollback.ErrNoManifest))
 	})
+
+	It("parses a complete set of args for rollback", func() {
+		appName, version, err := rollback.ParseRollbackArgs(
+			[]string{
+				"blue-green-rollback",
+				"appname",
+				"g1",
+			},
+		)
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(appName).To(Equal("appname"))
+		Expect(version).To(Equal("g1"))
+	})
+
 })
 
 var _ = Describe("ApplicationRepo", func() {
 	var (
 		cliConn *pluginfakes.FakeCliConnection
-		repo    *ApplicationRepo
+		repo    *rollback.ApplicationRepo
 	)
 
 	BeforeEach(func() {
 		cliConn = &pluginfakes.FakeCliConnection{}
-		repo = NewApplicationRepo(cliConn)
+		repo = rollback.NewApplicationRepo(cliConn)
 	})
 
 	Describe("RenameApplication", func() {
@@ -257,6 +271,38 @@ var _ = Describe("ApplicationRepo", func() {
 
 			err := repo.ListApplications()
 			Expect(err).To(MatchError("bad apps"))
+		})
+	})
+
+	Describe("StartApplication", func() {
+		It("starts an instance", func() {
+			err := repo.StartApplication("appName")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cliConn.CliCommandCallCount()).To(Equal(1))
+			args := cliConn.CliCommandArgsForCall(0)
+			Expect(args).To(Equal([]string{"start", "appName"}))
+		})
+	})
+
+	Describe("Map Route Application", func() {
+
+		It("map route an application", func() {
+			cliConn.GetAppReturns(plugin_models.GetAppModel{
+				Routes: []plugin_models.GetApp_RouteSummary{plugin_models.GetApp_RouteSummary{
+					Guid: "aaabbbbccc",
+					Host: "hostName",
+					Domain: plugin_models.GetApp_DomainFields{
+						Name: "microsoft.com",
+					},
+				},
+				},
+			}, nil)
+
+			err := repo.MapRouteApplication("appName", "hostName")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cliConn.CliCommandCallCount()).To(Equal(1))
+			args := cliConn.CliCommandArgsForCall(0)
+			Expect(args).To(Equal([]string{"map-route", "appName", "microsoft.com", "-n", "hostName"}))
 		})
 	})
 })
